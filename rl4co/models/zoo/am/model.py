@@ -8,6 +8,7 @@ from rl4co.models.zoo.am.policy import AttentionModelPolicy
 
 class AttentionModel(REINFORCE):
     """Attention Model based on REINFORCE.
+    Ref: Kool, Wouter, Herke van Hoof and Max Welling. “Attention, Learn to Solve Routing Problems!” ICLR'18.
 
     Args:
         env: Environment to use for the algorithm
