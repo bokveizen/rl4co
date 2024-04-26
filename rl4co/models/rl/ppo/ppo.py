@@ -1,14 +1,18 @@
-from typing import Any, Union
+from typing import IO, Any, Optional, Union, cast
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from torch.utils.data import DataLoader
-
+from lightning.pytorch.core.saving import _load_from_checkpoint
 from rl4co.envs.common.base import RL4COEnvBase
 from rl4co.models.rl.common.base import RL4COLitModule
 from rl4co.utils.pylogger import get_pylogger
+
+from typing_extensions import Self
+
+from lightning.fabric.utilities.types import _MAP_LOCATION_TYPE, _PATH
 
 log = get_pylogger(__name__)
 
@@ -142,29 +146,29 @@ class PPO(RL4COLitModule):
                 mini_batch_size = batch_size
 
             # Todo: Add support for multi dimensional batches
-            td.set("logprobs", out["log_likelihood"])
+            td.set("log_prob", out["log_likelihood"])
             td.set("reward", out["reward"])
             td.set("action", out["actions"])
 
             # Inherit the dataset class from the environment for efficiency
-            dataset = self.env.dataset_cls(td)
+            dataset = self.env.dataset_cls(td)            
             dataloader = DataLoader(
                 dataset,
                 batch_size=mini_batch_size,
                 shuffle=True,
                 collate_fn=dataset.collate_fn,
-            )
+            )            
 
             for _ in range(self.ppo_cfg["ppo_epochs"]):  # PPO inner epoch, K
-                for sub_td in dataloader:
+                for sub_td in dataloader:                    
                     sub_td = sub_td.to(td.device)
-                    previous_reward = sub_td["reward"].view(-1, 1)
+                    previous_reward = sub_td["reward"].view(-1, 1)                    
                     ll, entropy = self.policy.evaluate_action(
                         sub_td, action=sub_td["action"], env=self.env
                     )
 
                     # Compute the ratio of probabilities of new and old actions
-                    ratio = torch.exp(ll.sum(dim=-1) - sub_td["logprobs"]).view(
+                    ratio = torch.exp(ll.sum(dim=-1) - sub_td["log_prob"]).view(
                         -1, 1
                     )  # [batch, 1]
 
@@ -219,6 +223,50 @@ class PPO(RL4COLitModule):
                     "entropy": entropy.mean(),
                 }
             )
-
-        metrics = self.log_metrics(out, phase, dataloader_idx=dataloader_idx)
+        metrics = self.log_metrics(out, phase, dataloader_idx=dataloader_idx)        
         return {"loss": out.get("loss", None), **metrics}
+    
+    @classmethod
+    def load_from_checkpoint(
+        cls,
+        checkpoint_path: Union[_PATH, IO],
+        map_location: _MAP_LOCATION_TYPE = None,
+        hparams_file: Optional[_PATH] = None,
+        strict: bool = False,
+        load_baseline: bool = True,
+        **kwargs: Any,
+    ) -> Self:
+        """Load model from checkpoint/
+
+        Note:
+            This is a modified version of `load_from_checkpoint` from `pytorch_lightning.core.saving`.
+            It deals with matching keys for the baseline by first running setup
+        """
+
+        if strict:
+            log.warning("Setting strict=False for loading model from checkpoint.")
+            strict = False
+
+        # Do not use strict
+        loaded = _load_from_checkpoint(
+            cls,
+            checkpoint_path,
+            map_location,
+            hparams_file,
+            strict,
+            **kwargs,
+        )
+
+        # Load baseline state dict
+        if load_baseline:
+            # setup baseline first
+            loaded.setup()
+            loaded.post_setup_hook()
+            # load baseline state dict
+            state_dict = torch.load(checkpoint_path)["state_dict"]            
+            # get only baseline parameters            
+            state_dict = {k: v for k, v in state_dict.items() if "critic" in k}
+            state_dict = {k.replace("critic.", "", 1): v for k, v in state_dict.items()}
+            loaded.critic.load_state_dict(state_dict)
+
+        return cast(Self, loaded)
